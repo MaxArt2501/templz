@@ -28,6 +28,9 @@
 		// (document) instead of 11
 		docFragType = doc && doc.createDocumentFragment
 				&& doc.createDocumentFragment().nodeType,
+		isFragment = docFragType === 9
+				? function(frag) { return frag.nodeType === 9 && frag.nodeName === "#document-fragment"; }
+				: function(frag) { return frag.nodeType === 11; },
 
 		hasBind = "bind" in function(){},
 
@@ -55,7 +58,7 @@
 				};
 			})(),
 
-		serializeFragment = doc && "outerHTML" in doc.documentElement ? function(frag) {
+		serializeFragment = doc && ("outerHTML" in doc.documentElement ? function(frag) {
 			for (var i = 0, children = frag.childNodes, res = ""; i < children.length;) {
 				var node = children[i++];
 				switch (node.nodeType) {
@@ -64,13 +67,14 @@
 					case 8: res += "<!--" + node.nodeValue + "-->"; break;
 				}
 			}
+			return res;
 		} : (function(div) {
 			return function(frag) {
 				div.innerHTML = "";
 				div.appendChild(frag.cloneNode(true));
 				return div.innerHTML;
 			};
-		})(doc.createElement("div")),
+		})(doc.createElement("div"))),
 
 		// See http://jsperf.com/native-trim-vs-regex
 		trim = "".trim ? function(string) { return string.trim(); }
@@ -80,10 +84,23 @@
 
 		isArray = Array.isArray || (function(toString) {
 			return function (object) { return toString.call(object) === "[object Array]"; };
-		})(Object.prototype.toString);
+		})(Object.prototype.toString),
+
+		escapeString = (function(map, re) {
+			return function(string) {
+				return (string + "").replace(re, function(c) { return map[c]; });
+			};
+		})({
+			"&": "&#38;",
+			"<": "&#60;",
+			">": "&#62;",
+			'"': "&#34;",
+			"'": "&#39;",
+			"/": "&#47;"
+		}, /[&<>"'\/]/g);
 
 	function getTags(tags) {
-		return typeof tags === "string" ? tags.split(/\s+/, 2) : isArray(tags) && tags;
+		return typeof tags === "string" ? trim(tags).split(/\s+/, 2) : isArray(tags) && tags;
 	}
 
 	/*
@@ -133,7 +150,7 @@
 
 		for (var i = 0; i < parsed.length;) {
 			token = parsed[i++];
-			if (token.type === "#" || token.type === "^") {
+			if ((token.type === "#" || token.type === "^") && !token.children) {
 				stack.push(token);
 				sections.push(token);
 				token.children = stack = [];
@@ -158,11 +175,7 @@
 				if (!parsed.length || parsed.length === 1 && parsed[0].type === "text") continue;
 
 				// Checking tags closure
-				lone = getLoneSections(parsed);
-				if (lone[0].length)
-					throw new Error("Unopened section \"" + lone[0][0] + "\"");
-				if (lone[1].length)
-					throw new Error("Unclosed section \"" + lone[1][0] + "\"");
+				parsed = buildTree(checkParsedText(parsed, []));
 
 				if (!attrset) attrset = {};
 				attrset[attribs[j].name] = parsed;
@@ -203,7 +216,7 @@
 		function pushFragment() {
 			var l = curFrag.childNodes.length;
 			if (!l) return;
-			tokens.push(new Token("fragment", l === 1 ? curFrag.firstChild : curFrag));
+			tokens.push(new Token(Templz.FRAGMENT_TEMPLATE, l === 1 ? curFrag.firstChild : curFrag));
 			curFrag = newFrag();
 		}
 
@@ -225,25 +238,25 @@
 					tags = getTags(attr);
 
 				if (attr = current.getAttribute(prefix + "name")) {
-					token = new Token("name", attr);
+					token = new Token("name", trim(attr));
 					token.node = current.cloneNode(false);
 					token.node.removeAttribute(prefix + "name");
 				} else if (attr = current.getAttribute(prefix + "content")) {
-					token = new Token("&", attr);
+					token = new Token("&", trim(attr));
 					token.node = current.cloneNode(false);
 					token.node.removeAttribute(prefix + "content");
 				} else if (attr = current.getAttribute(prefix + "section")) {
-					token = new Token("#", attr);
+					token = new Token("#", trim(attr));
 					node = current.cloneNode(true);
 					node.removeAttribute(prefix + "section");
 					token.children = parseNode([ node ], tags, prefix);
 				} else if (attr = current.getAttribute(prefix + "empty")) {
-					token = new Token("^", attr);
+					token = new Token("^", trim(attr));
 					node = current.cloneNode(true);
 					node.removeAttribute(prefix + "empty");
 					token.children = parseNode([ node ], tags, prefix);
 				} else if (attr = current.getAttribute(prefix + "partial")) {
-					token = new Token(">", attr);
+					token = new Token(">", trim(attr));
 					token.node = current.cloneNode(false);
 					token.node.removeAttribute(prefix + "partial");
 				} else {
@@ -251,14 +264,16 @@
 
 					parsedAttributes = parseAttributes(current, tags);
 					children = current.childNodes.length ? parseNode(current.childNodes, tags, prefix) : [];
-					if (!parsedAttributes && (!children.length || children.length === 1 && children[0].type === "fragment"))
+					if (!parsedAttributes && (!children.length || children.length === 1 && children[0].type === "fragment")) {
 						// Just a common node without template tags
-						curFrag.appendChild(current.cloneNode(true));
-					else {
+						node = current.cloneNode(false);
+						if (children.length) node.appendChild(children[0].value);
+						curFrag.appendChild(node);
+					} else {
 						token = new Token("node");
 						token.attributes = parsedAttributes;
 						if (children.length > 1 || children.length === 1 && children[0].type !== "fragment") {
-							token.children = children;
+							token.children = buildTree(children);
 							token.node = current.cloneNode(false);
 						} else token.node = current.cloneNode(true);
 					}
@@ -299,19 +314,42 @@
 
 		var index = 0, endIndex = 0, length = string.length;
 
-		function clearEmptyLines() {
-			var re = /\s*?\n/g, match;
-
+		// Removes empty spaces around stand-alone tags.
+		function clearEmptyLines() { //return;
+			// debugger;
 			// Removing whitespaces from the last line of the last text token
-			if (last && last.type === "text")
-				last.value = last.value.replace(/(\s*\n)\s*$/, "$1");
 
-			// Repositioning endIndex to trim the whitespaces to EOL
-			// @todo Verify that works in old IE too...
-			re.lastIndex = endIndex + tagLen[1];
-			match = re.exec(string);
-			if (match && match.index === endIndex + tagLen[1])
-				endIndex += match[0].length;
+			// If the previous token isn't a text token, we're out
+			if (last && "text # ^ /".indexOf(last.type) === -1) return;
+
+			if (last && last.type === "text") {
+				// If the last token is a text token, but the last line contains
+				// non-space characters, or it doesn't contain an EOL but it's not
+				// entirely made of whitespace, we're out.
+				var lastCR = last.value.lastIndexOf("\n") + 1;
+				if (lastCR && /\S/.test(last.value.slice(lastCR))
+						|| !lastCR && (tokens.length > 1 || /\S/.test(last.value)))
+					return;
+			}
+
+			var strIdx = endIndex + tagLen[1],
+				nextCR = string.indexOf("\n", strIdx) + 1;
+			if (nextCR && !/\S/.test(string.slice(strIdx, nextCR))
+					|| (!nextCR && !/\S/.test(string.slice(strIdx)))) {
+				// If the following text contains an EOL, and before that there are
+				// only whitespaces, or the rest of the string it's entirely
+				// whitespace, we're in a standalone line
+
+				// Trimming the spaces since the last EOL
+				if (lastCR) last.value = last.value.slice(0, lastCR);
+				// Discarding the whitespace-only first token
+				else if (last && last.type === "text")
+					tokens.length = last = 0;
+
+				// Repositioning endIndex to trim the whitespaces to EOL or
+				// the end of the string
+				endIndex = nextCR ? nextCR - tagLen[1] : length;
+			}
 		}
 
 		while (index < length) {
@@ -342,6 +380,7 @@
 					sections.push(name);
 					clearEmptyLines();
 					tokens.push(last = new Token(value.charAt(0), name));
+					last.index = endIndex + tagLen[1];
 					break;
 				case "/": // Closing section
 					name = trim(value.substring(1));
@@ -349,35 +388,49 @@
 						throw new Error("Unclosed section \"" + value + "\"");
 					clearEmptyLines();
 					tokens.push(last = new Token("/", name));
+					last.index = index - tagLen[0];
 					break;
 				case "{": // Binding value, unescaped
 					if (value.charAt(value.length - 1) === "}")
 						value = value.slice(0, -1);
-					else if (string.charAt(endIndex++) !== "}" || string.substr(endIndex, tagLen[1]) !== tag[1])
+					else if (string.charAt(endIndex++) !== "}" || string.substr(endIndex, tagLen[1]) !== tags[1])
 						throw new Error("Unclosed tag at " + index);
 					// Fall-through!
 				case "&": // Binding value, unescaped
 					name = trim(value.substring(1));
 					tokens.push(last = new Token("&", name));
 					break;
+				case ">": // Partial
+					name = trim(value.substring(1));
+					token = new Token(">", name);
+					token.indent = "";
+					if (last && last.type === "text") {
+						value = last.value.lastIndexOf("\n") + 1;
+						if (value && !/\S/.test(value = last.value.slice(value)))
+							token.indent = value;
+						else if (tokens.length === 1 && !/\S/.test(last.value))
+							token.indent = last.value;
+					}
+					clearEmptyLines();
+					tokens.push(last = token);
+					break;
 				case "!": // Comment
 					// It should just delete the whitespaces around...
 
 					// Removing standalone lines
-					clearEmptyLines()
-					break;
-				case ">": // Partial
-					tokens.push(last = new Token(">", value));
+					clearEmptyLines();
 					break;
 				case "=": // Changing delimiters
 					if (value.charAt(value.length - 1) === "=")
 						value = value.slice(0, -1);
-					else if (string.charAt(endIndex++) !== "=" || string.substr(endIndex, tagLen[1]) !== tag[1])
+					else if (string.charAt(endIndex++) !== "=" || string.substr(endIndex, tagLen[1]) !== tags[1])
 						throw new Error("Unclosed tag at " + index);
-					tags = getTags(value.substring(1));
 
+					clearEmptyLines()
+					tags = getTags(value.substring(1));
 					// Adjusting endIndex for later addition
 					endIndex += tagLen[1] - tags[1].length;
+
 					tagLen = [ tags[0].length, tags[1].length ];
 					break;
 				default: // Binding value
@@ -388,24 +441,7 @@
 		return tokens;
 	}
 
-	var escapeString = (function(map, re) {
-		return function(string) {
-			return (string + "").replace(re, function(c) { return map[c]; });
-		};
-	})({
-		"&": "&#38;",
-		"<": "&#60;",
-		">": "&#62;",
-		'"': '&#34;',
-		"'": '&#39;',
-		"/": '&#47;'
-	}, /[&<>"'\/]/g);
-
-	var isArray = Array.isArray || (function(toString) {
-		return toString.call(object) === "[object Array]";
-	})(Object.prototype.toString);
-
-	// Doesn't support composed names yet (e.g. foo.bar.baz)
+	// Finds the indexed value in the context stack
 	function lookup(contextStack, name) {
 		var split = name.split("."),
 			i = contextStack.length,
@@ -413,8 +449,8 @@
 
 		for (; i--;) {
 			value = contextStack[i];
-			for (j = 0; j < split.length; j++)
-				if (split[j] in value)
+			for (j = 0; j < split.length && value; j++)
+				if (value[split[j]])
 					value = value[split[j]];
 				else break;
 
@@ -424,8 +460,8 @@
 	}
 
 	// Build the result from a set of tokens and a context stack
-	function renderTokens(tokens, type, contextStack, partials) {
-		var i = 0, isString = type === "string",
+	function renderTokens(tokens, type, contextStack, partials, indent) {
+		var i = 0, isString = type === Templz.STRING_TEMPLATE,
 			res = isString ? "" : newFrag(),
 			token, value, node, subres;
 
@@ -435,18 +471,19 @@
 
 			// Filling the copy with the content, if provided
 			if (content !== null)
-				if (typeof content === "string") copy.innerHTML = content;
-				else copy.appendChild(content);
+				if (typeof content === "object" && "nodeType" in content)
+					copy.appendChild(content);
+				else copy.innerHTML = content;
 
 			// Rendering the attributes
 			for (name in attribs)
-				copy.setAttribute(name, renderTokens(attribs[name], "string", ctxstack));
+				copy.setAttribute(name, renderTokens(attribs[name], Templz.STRING_TEMPLATE, ctxstack));
 
 			res.appendChild(copy);
 		}
 		function renderAttributes(node, attribs, context) {
 			for (var name in attribs)
-				node.setAttribute(name, renderTokens(attribs[name], "string", contextStack.concat([ context ])));
+				node.setAttribute(name, renderTokens(attribs[name], Templz.STRING_TEMPLATE, contextStack.concat([ context ])));
 		}
 
 		for (; i < tokens.length;) {
@@ -486,15 +523,18 @@
 									var ctxStack = contextStack.concat([ value[j] ]);
 									subres = renderTokens(token.children, type, ctxStack, partials);
 									if (isString) res += subres;
-									// else copyNode(token.children[0], subres, ctxStack);
 									else res.appendChild(subres);
 								}
 							}
-						} else if (value) {
-							subres = renderTokens(token.children, type, contextStack.concat([ value ]), partials);
-							if (isString) res += subres;
-							// else copyNode(token.children[0], subres, contextStack);
-							else res.appendChild(subres);
+						} else {
+							if (typeof value === "function") {
+								value = value(token.value);
+							}
+							if (value) {
+								subres = renderTokens(token.children, type, contextStack.concat([ value ]), partials);
+								if (isString) res += subres;
+								else res.appendChild(subres);
+							}
 						}
 					break;
 				case "^":
@@ -502,15 +542,18 @@
 					if (!value || isArray(value) && !value.length) {
 						subres = renderTokens(token.children, type, contextStack);
 						if (isString) res += subres;
-						// else copyNode(token.children[0], subres, contextStack);
 						else res.appendChild(subres);
 					}
 					break;
 				case ">":
-					if (!partials || !(token.value in partials)) break;
+					if (!partials || typeof partials !== "object" || !partials[token.value]) break;
 					value = partials[token.value];
+					if (typeof value === "string" || typeof value === "object" && "nodeType" in value)
+						value = Templz.compile(value);
 					if (value instanceof ParsedTemplate) {
 						if (value = value.render(contextStack[contextStack.length - 1], partials)) {
+							if (typeof value === "string" && token.indent)
+								value = token.indent + value.replace(/\n/g, "\n" + token.indent);
 							if (isString)
 								res += typeof value === "string" ? value : serializeFragment(value)
 							else copyNode(token, typeof value === "string" ? newText(value) : value, contextStack);
@@ -526,7 +569,7 @@
 		this.root = root;
 		this.tokens = [];
 
-		this.type = typeof root === "string" ? "string" : "fragment";
+		this.type = typeof root === "string" ? Templz.STRING_TEMPLATE : Templz.FRAGMENT_TEMPLATE;
 	};
 
 	ParsedTemplate.prototype = {
@@ -541,12 +584,63 @@
 		this.value = value;
 	};
 
+	/**
+	 * @namespace Templz
+	 */
 	var Templz = {
+		/**
+		 * Current version
+		 * @memberof Templz
+		 * @type {string}
+		 * @const
+		 */
+		version: "0.1.0",
 
+		/**
+		 * String template type.
+		 * @memberof Templz
+		 * @type {string}
+		 * @const
+		 */
+		STRING_TEMPLATE: "string",
+		/**
+		 * Fragment template type.
+		 * @memberof Templz
+		 * @type {string}
+		 * @const
+		 */
+		FRAGMENT_TEMPLATE: "fragment",
+
+		/**
+		 * Mustache tag delimiters.
+		 * @memberof Templz
+		 * @type {string|string[]}
+		 */
 		tags: [ "{{", "}}" ],
-		prefix: "tpl-",
 
-		parse: function(template, tags, prefix) {
+		/**
+		 * Templz directive attribute prefix.
+		 * @memberof Templz
+		 * @type {string}
+		 */
+		prefix: "tpz-",
+
+		/**
+		 * Compiles a template with the given tags delimiters and directive prefix.
+		 * @memberof Templz
+		 * @param {string|Node} template    It can be a string, a DocumentFragment or
+		 *                                  an Element node.
+		 * @param {string|String[]} [tags]  Tag delimiters. It can be either a string
+		 *                                  of delimiters separater by whitespace, or
+		 *                                  an array of two strings. Defaults to
+		 *                                  Templz.tags
+		 * @param {string} [prefix]         Directive attribute prefix. Defaults to
+		 *                                  Templz.prefix
+		 * @returns {ParsedTemplate}
+		 * @throws {Error}                  Throws a TypeError is a null template is
+		 *                                  passed; an Error for compiling errors.
+		 */
+		compile: function(template, tags, prefix) {
 			if (arguments.length < 3)
 				prefix = Templz.prefix;
 			if (arguments.length < 2)
@@ -554,13 +648,8 @@
 
 			if (typeof template === "string") {
 				// Should work exactly like mustache.
-				var parsed = parseString(template, tags),
-					lone = getLoneSections(parsed);
-				if (lone[0].length)
-					throw new Error("Unopened section \"" + lone[0][0] + "\"");
-				if (lone[1].length)
-					throw new Error("Unclosed section \"" + lone[1][0] + "\"");
-				var pt = new ParsedTemplate(template);
+				var parsed = checkParsedText(parseString(template, tags), []),
+					pt = new ParsedTemplate(template);
 				pt.tokens = buildTree(parsed);
 				return pt;
 			} else if (!template) {
@@ -569,7 +658,7 @@
 				// It's a single text node. Again, just like mustache, but
 				// returning a text node instead.
 				// Should it do the same for comment and cdata nodes too?
-			} else if (template.nodeType === 1) {
+			} else if (template.nodeType === 1 || isFragment(template)) {
 				// The real deal
 				var parsed = parseNode(template.nodeName === "TEMPLATE" && hasTemplates
 						&& template instanceof HTMLTemplateElement ? template.content.childNodes : template.childNodes,
@@ -578,8 +667,25 @@
 				pt.tokens = buildTree(parsed);
 				return pt;
 			}
-		}
+		},
 
+		/**
+		 * Serialize the children of a node. Specifically thought for DocumentFragment
+		 * nodes, it can be used with Element nodes too, and also every object with a
+		 * childNodes property.
+		 * @memberof Templz
+		 * @param {Node} fragment  Fragment to serialize
+		 * @returns {string}
+		 */
+		serialize: function(fragment) { return serializeFragment(fragment); },
+
+		/**
+		 * Creates a DocumentFragment out of a raw HTML string.
+		 * @memberof Templz
+		 * @param {string} html
+		 * @returns {DocumentFragment}
+		 */
+		createFragment: function(html) { return getFrag(html); }
 	};
 
 	return Templz;
