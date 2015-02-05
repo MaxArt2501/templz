@@ -3,26 +3,59 @@ Templz
 
 Logic-less `<template>`s with a sense.
 
-A Mustache-inspired template engine that can work with string and DOM elements. Even together!
+A Mustache-inspired template engine that can work with string templates and DOM elements. Even together!
 
 ## Installation
 
-As a standalone Javascript file (not needed when using AMD loaders like Require.js):
+As a standalone Javascript file:
 
 ```html
 <script type="text/javascript" src="templz.js"></script>
 ```
 
-When using an AMD loader (like RequireJS in this example), you should require the module
+When using an AMD loader (like [RequireJS](http://requirejs.org/) in this example), you should require the module
 at the beginning like this:
 
 ```js
-require(["templz"], function(Templz) {
+require([ "templz" ], function(Templz) {
     ...
 });
 ```
 
+The package is also available with Bower:
+
+```bash
+$ bower install templz
+```
+
+In node.js/io.js:
+
+```bash
+$ npm install templz
+```
+
+```js
+var Templz = require("templz");
+```
+
 The module returns the `Templz` object, together with its static methods and properties.
+
+Although Templz can be used just for string templates, it can be used for DOM templates in a node.js/io.js environment too when some DOM implementation is provided. This is an example using [jsdom](https://github.com/tmpvar/jsdom):
+
+```js
+var Templz = require("templz"),
+    jsdom = require("jsdom");
+
+jsdom.env("<html></html>", function(errors, window) {
+    if (window) {
+        var newTemplz = new Templz.Context(window);
+
+        // Do stuff with newTemplz just like it's Templz
+    }
+});
+```
+
+More info about the `Templz.Context` class later (hint: the `Templz` object itself is an istance of `Templz.Context`).
 
 
 ## Usage
@@ -191,9 +224,83 @@ If the rendering template is a *fragment* template, then *fragment* partials are
 
 On the other hand, if the template that's being rendered is a *string* template, a *string* partial is interpolated as specified by Mustache. But if it's a *fragment* template partial, the result is inserted after a serialization of the resulting `DocumentFragment` node.
 
-## API
+## Data binding
 
-These are the methods and properties defined on the `Templz` object.
+Compiled templated can be bound do a data objects, allowing them to automatically update the rendered result when something in the data object changes. This creates a `BoundTemplate` object. Of course, this makes most sense only wen the result is attached to the document.
+
+Suppose we have a template like:
+
+```html
+<template id="personList">
+    The current list is:
+    <ul>
+        <li tpz-section="list">{{.}}</li>
+    </ul>
+</template>
+```
+
+Now we can bind this template to some data, and add it to the document:
+
+```js
+var template = Templz.compile(document.getElementById("personList")),
+    data = { list: [ "Mark", "Bob" ] },
+    boundTemplate;
+
+boundTemplate = template.bindToData(data);
+boundTemplate.appendTo(document.body);
+```
+
+This is pretty much equivalent to appending the result of `template.render(data)` to the body, but now if we change something in `data` the result is automatically rendered in the document. For example, if we do `data.list.push("Wade")`, we'd get without further intervention:
+
+```html
+<html>
+    ...
+    <body>
+        ...
+        The current list is:
+        <ul>
+            <li>Mark</li>
+            <li>Bob</li>
+            <li>Wade</li>
+        </ul>
+    </body>
+</html>
+```
+
+Alternatively, data binding can be performed on elements that are already in the document:
+
+```html
+<div id="currentRecipient">
+    Name: <b tpz-name="name"></b><br/>
+    Email: <a href="mailto:{{email}}" tpz-name="email"></a><br/>
+    Role: <i tpz-name="role"></i>
+</div>
+```
+
+```js
+var data = { name: "John Doe", email: "john@doe.com", role: "private" };
+Templz.bindElementToData(document.getElementById("currentRecipient"), data);
+```
+
+### Support notes on data-binding
+
+Data bound templates rely on [EcmaScript 7's `Object.observe`](http://arv.github.io/ecmascript-object-observe/) , which is natively supported by Blink-based environments (Chrome, Opera, node.js 0.11.13+, io.js). If `Object.observe` isn't supported, the `.bindToData` and `Templz.bindElementToData` methods aren't defined, but this can be solved using of the shims that could fill the gap:
+
+* [my own implementation](https://github.com/MaxArt2501/object-observe)
+* [jdarling](https://github.com/jdarling/Object.observe)
+
+If you use [RequireJS](http://requirejs.org/) to load Templz, you can load the polyfill in advance by shimming a dependency:
+
+```js
+if (!Object.observe)
+    requirejs.config({
+        shim: {
+            templz: { deps: [ "object.observe" ] }
+        }
+    });
+```
+
+## API
 
 * `Templz.compile(template[, tags[, prefix]])`
 
@@ -203,13 +310,23 @@ These are the methods and properties defined on the `Templz` object.
   
   The `prefix` argument is to define the Templz directive prefix. If omitted, `Templz.prefix` is used.
 
+* `Templz.bindElementToData(element, data)`
+
+  This creates 
+
 * `Templz.serialize(fragment)`
 
   Serializes the children of a `Node` object into a string. Developed with `DocumentFragment` nodes in mind, it can work with `Element` nodes too.
 
+  It relies on the implementation of `innerHTML`, so if that's broken in some way (like in IE8-), this has the same problems. The best results are obtained if the enviroment supports `<template>` elements. If you need some more robust and platform independent serializer, there are project that can do for you (like [parse5](https://github.com/inikulin/parse5), for node.js).
+
 * `Templz.createFragment(html)`
 
-  Creates a `DocumentFragment` node, initialized with the given content passed as raw HTML.
+  Creates a `DocumentFragment` node, initialized with the given content passed as raw HTML. See `Templz.serialize` for notes about HTML handling.
+
+* `Templz.bindElementToData(element, data, [tags], [prefix], [partials])`
+
+  Creates a template out of the given element, and binds it to the given data right in place. Returns a `BoundTemplate` object.
 
 * `Templz.tags`
 
@@ -223,7 +340,19 @@ These are the methods and properties defined on the `Templz` object.
 
   Constants to check the `type` property of compiled templates. Currently set to `"string"` and `"fragment"`, respectively.
 
-* `ParsedTemplate.render([data, [partials]])`
+* `Templz.Context(window, [document])`
+
+  Class that defines a context for Templz to operate with. If `document` is not provided, `window.document` is used.
+
+  Defining a context is fundamental for Templz to work with fragment templates. The `Templz` object itself is an instance of this class, initialized with the `window` object that is commonly provided in a browser environment. All the above methods and properties of `Templz` come from the prototype of `Templz.Context`.
+
+  However, in a node.js/io.js environment (or in a web worker, for the matter), the `window` object isn't defined, so the `Templz` object can't work with fragment templates, and even the methods `createFragment` and `serialize` aren't defined. To fix this, one should provide an implementation of the DOM (like [jsdom](https://github.com/tmpvar/jsdom)) and explicitly create a context for Templz.
+
+* `ParsedTemplate.prototype.type`
+
+  The type of the compiled template. It may equal `Templz.STRING_TEMPLATE` or `Templz.FRAGMENT_TEMPLATE`.
+
+* `ParsedTemplate.prototype.render([data, [partials]])`
 
   Renders a compiled template, returning a string (if it's a *string* template) or a `DocumentFragment` node (if it's a *fragment* template).
   
@@ -231,9 +360,26 @@ These are the methods and properties defined on the `Templz` object.
   
   Similarly, `partials` is a key/value map that provides the partials for rendering. The given partials can be `ParsedTemplate` objects of either types, or strings or nodes. In these two last cases, they're compiled using `Templz.compile`.
 
-* `ParsedTemplate.type`
+* `ParsedTemplate.prototype.bindToData(data, [partials])`
 
-  The type of the compiled template. It may equal `Templz.STRING_TEMPLATE` or `Templz.FRAGMENT_TEMPLATE`.
+  Binds a template to a data object, getting a `BoundTemplate` object in return.
+
+* `BoundTemplate.prototype.bind(data, [partials])`
+
+  Sets the data (and eventually partials) that which the template is bound to.
+
+* `BoundTemplate.prototype.unbind()`
+
+  Unbinds the template, *de facto* ending any live behaviour.
+
+* `BoundTemplate.prototype.appendTo(parent)`, `BoundTemplate.prototype.insertBefore(element)`
+
+  Attaches the template to DOM tree.
+
+* `BoundTemplate.prototype.getTemplate()`
+
+  Returns the underlying `ParsedTemplate` object. Useful when the `BoundTemplate` object has been create with `Templz.bindElementToData`.
+
 
 ## Browser support
 
@@ -259,21 +405,19 @@ Moreover, Templz indents all the lines of an indented partial. This is correct, 
   
 ## To-do
 
-* Full JSDoc code commenting
-* Overall code optimization
+* Engine rewrite for overall optimization
+* Directives to dynamically set node attributes
 * Complete test cases and Mustache specs conformity
-* More examples
 * Comparison benchmarks
-* `Templz.serialize`, a utility to serialize nodes
-* node.js support with some DOM implementation like [jsdom](https://github.com/tmpvar/jsdom)
-* Upload as `npm` module and `bower` package
+* *More* tests...
 
 ### Under consideration
 
+* Filters
+* Extensions
+* Two-way data binding
 * `Templz.render` for direct template rendering
-* Template caching: compiling templates allows the developer to handle his/her own caches
-* `tpz-comment`: trying to find a point in template comments when you can use HTML comments
-* Some directive to dynamically set node attributes
+* Template caching: compiling templates allows developers to handle their own caches
 * Lambda functions as sections
 * Complete XML support
 * Rendering comment and CDATA nodes
@@ -282,7 +426,7 @@ Moreover, Templz indents all the lines of an indented partial. This is correct, 
 
 The MIT License (MIT)
 
-Copyright (c) 2014 Massimo Artizzu (MaxArt2501)
+Copyright (c) 2014-2015 Massimo Artizzu (MaxArt2501)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

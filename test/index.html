@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>Templz tests</title>
+        <link rel="stylesheet" href="mocha.css" />
+    </head>
+    <body>
+        <div id="mocha"></div>
+        <script src="../util/expect.js"></script>
+        <script src="../util/mocha.js"></script>
+        <script src="../templz.js"></script>
+        <script>mocha.setup('bdd')</script>
+        <script src="test-strings.js"></script>
+        <script src="test-fragments.js"></script>
+        <script src="test-templz.js"></script>
+        <script>mocha.run()</script>
+    </body>
+</html>
